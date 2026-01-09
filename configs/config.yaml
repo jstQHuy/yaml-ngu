@@ -1,0 +1,160 @@
+models:
+  openai:
+    provider: openai
+    model: gpt-4o-mini
+    temperature: 0
+    timeout: 180
+    api_key: ${OPENAI_API_KEY}
+  deepseek:
+    provider: deepseek
+    model: deepseek-chat
+    temperature: 0
+    timeout: 120
+    api_key: ${DEEPSEEK_API_KEY}
+cve_scoring:
+  weights:
+    lang_class:
+      c1: 0.8
+      c2: 1.0
+      c3: 1.1
+    vul_type:
+      Code Execution: 10
+      Privilege Escalation: 8
+      Information Leak: 6
+      Bypass: 6
+      Denial of Service: 2
+    exp_maturity:
+      Exploit: 1
+      PoC+: 0.8
+      PoC: 0.6
+      None: 0.3
+    exp_flexibility:
+      flex: 0.8
+      unflex: 1.0
+    isRemote:
+      'True': 20
+      'False': 0
+    attack_complexity:
+      code_attack_evasion:
+        'True': 5
+        'False': 0
+      code_info_dependency:
+        'True': 5
+        'False': 0
+      code_attack_condition:
+        'True': 5
+        'False': 0
+      code_attack_probability:
+        'True': 5
+        'False': 0
+      code_privilege_required:
+        'True': 5
+        'False': 0
+      code_user_interaction:
+        'True': 5
+        'False': 0
+      doc_attack_evasion:
+        'True': 5
+        'False': 0
+      doc_info_dependency:
+        'True': 5
+        'False': 0
+      doc_attack_condition:
+        'True': 5
+        'False': 0
+      doc_attack_probability:
+        'True': 5
+        'False': 0
+      doc_privilege_required:
+        'True': 5
+        'False': 0
+      doc_user_interaction:
+        'True': 5
+        'False': 0
+    source_weights:
+      expdb: 1.1
+      gthb: 1
+      gg: 0.85
+    trending_score: 0.2
+    expdb_default_score: 20
+runtime:
+  recon:
+    current_topic: STRATOSPHERE-propromax
+    target_ip: 10.129.57.147
+    model: openai
+    memory_dir: recon_memory
+    enable_autorun: true
+    command_timeout_sec: 500
+    max_output_chars: 20000
+    mode: guided
+    history_window: 8
+    summary_max_chars: 6000
+    llm_clip_chars: 3500
+    max_attempts: 30
+    # AUTO engine: "tasks" (evidence-driven YAML) or "llm" (legacy)
+    auto_engine: tasks
+    # Path is relative to project root unless absolute
+    tasks_yaml: configs/recon_tasks.yaml
+    # Optional: ground recon command suggestions in your local tool docs (PDF/TXT/MD).
+    # Put cheat-sheets under docs/tools/ (or any directory) and enable below.
+    tool_rag:
+      enable: true
+      docs_dir: docs/tools/resources
+      allow_pdf: true
+      max_pdf_pages: 12
+      top_k: 6
+      max_chars: 9000
+    # Optional: bounded feedback-loop to extend coverage after YAML tasks are exhausted.
+    # This stays *Recon-only* and still validates commands against allow/deny regex.
+    adaptive_recon:
+      enable: true
+      task_selector: llm
+      task_candidate_limit: 12
+      max_rounds: 2
+      max_cmds_per_round: 1
+      min_new_evidence_keys: 1
+      use_command_extractor: true
+  planning:
+    economic_mode: true
+    model: openai
+    use_recon_memory: true
+    multi_keywords: true
+    max_keywords: 6
+    keyword: ''
+    app: ''
+    version: ''
+    vuln_type: ''
+    output_dir: data/exp_info
+    cvemap: &id001
+      fuzzy_search: true
+      max_year: 2014
+      min_year: 2014
+      max_entry: 50
+    exploitdb_dir: /opt/exploitdb/
+    current_topic: STRATOSPHERE-propromax
+    vulnx: ''
+  execution:
+    current_topic: STRATOSPHERE-propromax
+    repo_url: ''
+    doc_dir: data/exp_source
+    target_ip: 10.129.57.147
+    target_port: ''
+    attacker_ip: 127.0.0.1
+    command_to_execute: touch /tmp/success
+    model: openai
+    prefer_plan_json: true
+    force_repo_from_plan: true
+    include_recon_memory: true
+    recon_memory_max_chars: 6000
+    enable_autorun: true
+    command_timeout: 60
+    max_output_chars: 12000
+    max_attempts: 100
+  pipeline:
+    run_recon: true
+    run_planning: true
+    run_execution: true
+    topic_from_target: true
+    write_plan_path: data/exp_info/plan.json
+
+

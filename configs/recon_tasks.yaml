@@ -1,0 +1,500 @@
+version: 2
+defaults:
+  output_root: recon_out
+  user_agent: Mozilla/5.0 (PentestAgent-Recon)
+  curl_max_time_sec: 12
+  curl_insecure: -k
+  bash_timeout_sec: 15
+  web_long_timeout_sec: 180
+  gobuster_threads: 30
+  wl_dir_common_seclists: /home/pentestagent/SecLists/Discovery/Web-Content/common_directories.txt
+  wl_dir_common: /home/pentestagent/SecLists/Discovery/Web-Content/common.txt
+  wl_dir_medium: /home/pentestagent/SecLists/Discovery/Web-Content/raft-medium-directories.txt
+  wl_subdomains: /home/pentestagent/SecLists/Discovery/DNS/subdomains-top1million-110000.txt
+  wl_vhosts: /home/pentestagent/SecLists/Discovery/DNS/subdomains-top1million-110000.txt
+
+tasks:
+  # ----------------------------
+  # Phase 1: Discovery / Baseline
+  # ----------------------------
+  - id: tcp_full_scan
+    title: TCP full port scan (fast)
+    category: discovery
+    requires: []
+    produces: [net.tcp_ports]
+    command: nmap -Pn -p- --min-rate=1000 -T4 {ip} -oG {out}/nmap_tcp_all.gnmap
+    parser: nmap_gnmap_ports
+    requires_tools: [nmap]
+    priority: 100
+
+  - id: tcp_service_scan
+    title: TCP service & version scan for discovered ports
+    category: fingerprint
+    requires: [net.tcp_ports]
+    produces: [net.services, web.base_urls]
+    command: nmap -Pn -sV -sC -p {tcp_ports_csv} {ip} -oX {out}/nmap_tcp_svc.xml -oN {out}/nmap_tcp_svc.txt
+    parser: nmap_xml_services
+    requires_tools: [nmap]
+    priority: 95
+
+  - id: tcp_banner_grab_nc
+    title: TCP banner grab (best-effort) for discovered ports
+    category: fingerprint
+    requires: [net.tcp_ports]
+    produces: [net.banners_raw]
+    command: >-
+      bash -lc 'for p in $(echo {tcp_ports_csv} | tr "," " "); do
+      echo "### {ip}:$p";
+      printf "HEAD / HTTP/1.0\r\n\r\n" | nc -nvw 2 {ip} $p 2>&1 | head -n 40;
+      echo;
+      done' > {out}/nc_banners.txt
+    parser: capture_file
+    output_file: nc_banners.txt
+    optional: true
+    requires_tools: [bash, nc, head, tr]
+    priority: 30
+
+  # ----------------------------
+  # Phase 2: Web Recon (HTTP/HTTPS)
+  # ----------------------------
+  - id: http_headers
+    title: HTTP response headers (root)
+    category: http
+    foreach: web.base_urls
+    requires: [web.base_urls]
+    produces: [web.http.headers:{item}]
+    command: >-
+      curl -sS -I {curl_insecure} --max-time {curl_max_time_sec} -A '{user_agent}' {item} > {out}/headers_{safe_item}.txt
+    parser: capture_file
+    output_file: headers_{safe_item}.txt
+    requires_tools: [curl]
+    priority: 90
+
+  - id: http_root_fetch
+    title: HTTP root fetch (HTML snapshot)
+    category: http
+    foreach: web.base_urls
+    requires: [web.base_urls]
+    produces: [web.http.root:{item}]
+    command: >-
+      curl -sS {curl_insecure} --max-time {curl_max_time_sec} -A '{user_agent}' {item}/ > {out}/root_{safe_item}.html
+    parser: capture_file
+    output_file: root_{safe_item}.html
+    requires_tools: [curl]
+    priority: 88
+
+
+  - id: nikto_scan
+    title: Nikto scan (best-effort)
+    category: http
+    foreach: web.base_urls
+    requires: [web.base_urls]
+    produces: [web.nikto:{item}]
+    command: >-
+      timeout {web_long_timeout_sec}s nikto -h {item} -nointeractive -ask no -C all -output {out}/nikto_{safe_item}.txt 2>&1 || true
+    parser: capture_file
+    output_file: nikto_{safe_item}.txt
+    optional: true
+    requires_tools: [nikto, timeout]
+    priority: 82
+
+  - id: gobuster_dir_common
+    title: Gobuster dir enum (common_directories.txt)
+    category: web_discovery
+    foreach: web.base_urls
+    requires: [web.base_urls]
+    produces: [web.gobuster.dir.common:{item}]
+    command: >-
+      timeout {web_long_timeout_sec}s gobuster dir -u {item} -w {wl_dir_common_seclists} -t {gobuster_threads} -q -b 404 -o {out}/gobuster_dir_common_{safe_item}.txt 2>&1 || true
+    parser: capture_file
+    output_file: gobuster_dir_common_{safe_item}.txt
+    optional: true
+    requires_tools: [gobuster, timeout]
+    requires_files: ['{wl_dir_common_seclists}']
+    priority: 81
+
+  - id: http_options
+    title: HTTP OPTIONS (allowed methods)
+    category: http
+    foreach: web.base_urls
+    requires: [web.base_urls]
+    produces: [web.http.options:{item}]
+    command: >-
+      curl -sS {curl_insecure} --max-time {curl_max_time_sec} -A '{user_agent}' -X OPTIONS -i {item}/ > {out}/options_{safe_item}.txt
+    parser: capture_file
+    output_file: options_{safe_item}.txt
+    optional: true
+    requires_tools: [curl]
+    priority: 35
+
+  - id: http_robots
+    title: robots.txt (if present)
+    category: http
+    foreach: web.base_urls
+    requires: [web.base_urls]
+    produces: [web.http.robots:{item}]
+    command: >-
+      curl -sS {curl_insecure} --max-time {curl_max_time_sec} -A '{user_agent}' {item}/robots.txt > {out}/robots_{safe_item}.txt
+    parser: capture_file
+    output_file: robots_{safe_item}.txt
+    optional: true
+    requires_tools: [curl]
+    priority: 40
+
+  - id: http_sitemap
+    title: sitemap.xml (if present)
+    category: http
+    foreach: web.base_urls
+    requires: [web.base_urls]
+    produces: [web.http.sitemap:{item}]
+    command: >-
+      curl -sS {curl_insecure} --max-time {curl_max_time_sec} -A '{user_agent}' {item}/sitemap.xml > {out}/sitemap_{safe_item}.xml
+    parser: capture_file
+    output_file: sitemap_{safe_item}.xml
+    optional: true
+    requires_tools: [curl]
+    priority: 38
+
+  - id: http_git_head
+    title: Check exposed .git/HEAD
+    category: http
+    foreach: web.base_urls
+    requires: [web.base_urls]
+    produces: [web.http.git_head:{item}]
+    command: >-
+      curl -sS {curl_insecure} --max-time {curl_max_time_sec} -A '{user_agent}' {item}/.git/HEAD > {out}/git_head_{safe_item}.txt
+    parser: capture_file
+    output_file: git_head_{safe_item}.txt
+    optional: true
+    requires_tools: [curl]
+    priority: 35
+
+  - id: http_fetch_getting_started
+    title: Fetch GettingStarted.html (common landing link)
+    category: http
+    foreach: web.base_urls
+    requires: [web.base_urls]
+    produces: [web.http.page.getting_started:{item}]
+    command: >-
+      curl -sS {curl_insecure} --max-time {curl_max_time_sec} -A '{user_agent}' {item}/GettingStarted.html > {out}/GettingStarted_{safe_item}.html
+    parser: capture_file
+    output_file: GettingStarted_{safe_item}.html
+    optional: true
+    requires_tools: [curl]
+    priority: 60
+
+  - id: http_fetch_assets_basic
+    title: Fetch common assets (main.js, main.css) (best-effort)
+    category: http
+    foreach: web.base_urls
+    requires: [web.base_urls]
+    produces: [web.http.assets.basic:{item}]
+    command: >-
+      bash -lc 'set +e;
+      for p in main.js main.css; do
+        curl -sS {curl_insecure} --max-time {curl_max_time_sec} -A "{user_agent}" "{item}/$p" -o "{out}/${p}_{safe_item}" || true;
+      done;
+      echo "ok" > "{out}/assets_basic_{safe_item}.txt"'
+    parser: capture_file
+    output_file: assets_basic_{safe_item}.txt
+    optional: true
+    requires_tools: [bash, curl]
+    priority: 25
+
+  - id: httpx_probe
+    title: httpx probe (status/title/server/tech)
+    category: http
+    foreach: web.base_urls
+    requires: [web.base_urls]
+    produces: [web.httpx:{item}]
+    command: >-
+      httpx -silent -json -title -status-code -content-type -web-server -tech-detect -follow-redirects -timeout 8 -u {item} > {out}/httpx_{safe_item}.jsonl
+    parser: httpx_json
+    output_file: httpx_{safe_item}.jsonl
+    optional: true
+    requires_tools: [httpx]
+    priority: 55
+
+  - id: whatweb
+    title: whatweb fingerprint
+    category: http
+    foreach: web.base_urls
+    requires: [web.base_urls]
+    produces: [web.whatweb:{item}]
+    command: >-
+      whatweb --color=never --no-errors -a 3 {item} > {out}/whatweb_{safe_item}.txt
+    parser: capture_file
+    output_file: whatweb_{safe_item}.txt
+    optional: true
+    requires_tools: [whatweb]
+    priority: 52
+
+  - id: nmap_http_scripts_common
+    title: Nmap common HTTP scripts on discovered TCP ports (safe scripts)
+    category: http
+    requires: [net.tcp_ports]
+    produces: [web.nmap.http_scripts]
+    command: >-
+      nmap -Pn -p {tcp_ports_csv} --script http-title,http-headers,http-methods,http-enum {ip} -oN {out}/nmap_http_scripts.txt
+    parser: capture_file
+    output_file: nmap_http_scripts.txt
+    optional: true
+    requires_tools: [nmap]
+    priority: 50
+
+  # ----------------------------
+  # Phase 3: Web Content Discovery
+  # ----------------------------
+  - id: ferox_root
+    title: feroxbuster (depth 2)
+    category: web_discovery
+    foreach: web.base_urls
+    requires: [web.base_urls]
+    produces: [web.ferox:{item}]
+    command: >-
+      feroxbuster -u {item} -x php,txt,html,js -d 2 -k -q -o {out}/ferox_{safe_item}.txt
+    parser: capture_file
+    output_file: ferox_{safe_item}.txt
+    optional: true
+    requires_tools: [feroxbuster]
+    priority: 45
+
+  - id: ffuf_dir_common
+    title: ffuf directory discovery (common.txt)
+    category: web_discovery
+    foreach: web.base_urls
+    requires: [web.base_urls]
+    produces: [web.ffuf.dir.common:{item}]
+    command: >-
+      ffuf -u {item}/FUZZ -w {wl_dir_common} -t 40 -mc 200,204,301,302,307,401,403 -fc 404 -of json -o {out}/ffuf_dir_common_{safe_item}.json -s
+    parser: ffuf_json
+    output_file: ffuf_dir_common_{safe_item}.json
+    optional: true
+    requires_tools: [ffuf]
+    requires_files: ['{wl_dir_common}']
+    priority: 44
+
+  - id: ffuf_dir_medium
+    title: ffuf directory discovery (raft-medium-directories.txt)
+    category: web_discovery
+    foreach: web.base_urls
+    requires: [web.base_urls]
+    produces: [web.ffuf.dir.medium:{item}]
+    command: >-
+      ffuf -u {item}/FUZZ -w {wl_dir_medium} -t 40 -mc 200,204,301,302,307,401,403 -fc 404 -of json -o {out}/ffuf_dir_medium_{safe_item}.json -s
+    parser: ffuf_json
+    output_file: ffuf_dir_medium_{safe_item}.json
+    optional: true
+    requires_tools: [ffuf]
+    requires_files: ['{wl_dir_medium}']
+    priority: 20
+
+  - id: ffuf_tomcat_probe
+    title: Probe common Tomcat paths (small inline list)
+    category: web_discovery
+    foreach: web.base_urls
+    requires: [web.base_urls]
+    produces: [web.probe.tomcat:{item}]
+    command: >-
+      bash -lc 'cat > {out}/wl_tomcat_small.txt << "EOF"
+      manager
+      manager/html
+      host-manager
+      host-manager/html
+      docs
+      examples
+      EOF
+      ffuf -u {item}/FUZZ -w {out}/wl_tomcat_small.txt -t 20 -mc 200,204,301,302,307,401,403 -fc 404 -of json -o {out}/ffuf_tomcat_{safe_item}.json -s'
+    parser: ffuf_json
+    output_file: ffuf_tomcat_{safe_item}.json
+    optional: true
+    requires_tools: [bash, ffuf]
+    priority: 42
+
+  - id: ffuf_vhost
+    title: ffuf vhost discovery via Host header
+    category: web_discovery
+    foreach: web.base_urls
+    requires: [web.base_urls]
+    produces: [web.ffuf.vhost:{item}]
+    command: >-
+      bash -lc 'ffuf -u "{item}" -H "Host: FUZZ.{host}" -w "{wl_vhosts}" -t 40 -mc 200,204,301,302,307,401,403 -fc 404 -of json -o "{out}/ffuf_vhost_{safe_item}.json" -s'
+    parser: ffuf_json
+    output_file: ffuf_vhost_{safe_item}.json
+    optional: true
+    requires_tools: [bash, ffuf]
+    requires_files: ['{wl_vhosts}']
+    priority: 15
+
+  # ----------------------------
+  # Phase 4: Broad, read-only checks (optional)
+  # ----------------------------
+  - id: nuclei
+    title: nuclei scan (broad templates) - JSONL output
+    category: vuln_scan
+    foreach: web.base_urls
+    requires: [web.base_urls]
+    produces: [web.nuclei:{item}]
+    command: >-
+      nuclei -u {item} -silent -jsonl -o {out}/nuclei_{safe_item}.jsonl -rl 10
+    parser: nuclei_jsonl
+    output_file: nuclei_{safe_item}.jsonl
+    optional: true
+    requires_tools: [nuclei]
+    priority: 10
+
+  # ----------------------------
+  # Phase 5: Service-specific Enumeration (gated by ports)
+  # ----------------------------
+  - id: ssh_enum_nmap
+    title: "SSH enum (nmap scripts: hostkey, algos)"
+    category: ssh
+    requires: [net.services]
+    produces: [net.ssh.enum]
+    when_ports_any: [22]
+    command: nmap -Pn -p 22 --script ssh-hostkey,ssh2-enum-algos {ip} -oN {out}/nmap_ssh_enum.txt
+    parser: capture_file
+    output_file: nmap_ssh_enum.txt
+    optional: true
+    requires_tools: [nmap]
+    priority: 40
+
+  - id: ftp_enum_nmap
+    title: "FTP enum (nmap scripts: ftp-anon, ftp-syst)"
+    category: ftp
+    requires: [net.services]
+    produces: [net.ftp.enum]
+    when_ports_any: [21]
+    command: nmap -Pn -p 21 --script ftp-anon,ftp-syst {ip} -oN {out}/nmap_ftp_enum.txt
+    parser: capture_file
+    output_file: nmap_ftp_enum.txt
+    optional: true
+    requires_tools: [nmap]
+    priority: 25
+
+  - id: smtp_enum_nmap
+    title: "SMTP enum (nmap scripts: smtp-commands)"
+    category: smtp
+    requires: [net.services]
+    produces: [net.smtp.enum]
+    when_ports_any: [25, 465, 587]
+    command: nmap -Pn -p 25,465,587 --script smtp-commands {ip} -oN {out}/nmap_smtp_enum.txt
+    parser: capture_file
+    output_file: nmap_smtp_enum.txt
+    optional: true
+    requires_tools: [nmap]
+    priority: 22
+
+  - id: rpcinfo_111
+    title: RPC services via rpcinfo (111)
+    category: rpc
+    requires: [net.services]
+    produces: [net.rpc.info]
+    when_ports_any: [111]
+    command: >-
+      bash -lc 'timeout {bash_timeout_sec}s rpcinfo -p {ip} 2>&1 > {out}/rpcinfo.txt || true'
+    parser: capture_file
+    output_file: rpcinfo.txt
+    optional: true
+    requires_tools: [bash, rpcinfo, timeout]
+    priority: 18
+
+  - id: nfs_showmount
+    title: NFS exports via showmount (2049)
+    category: nfs
+    requires: [net.services]
+    produces: [net.nfs.exports]
+    when_ports_any: [2049]
+    command: >-
+      bash -lc 'timeout {bash_timeout_sec}s showmount -e {ip} 2>&1 > {out}/showmount_exports.txt || true'
+    parser: capture_file
+    output_file: showmount_exports.txt
+    optional: true
+    requires_tools: [bash, showmount, timeout]
+    priority: 18
+
+  - id: smb_enum_nmap
+    title: "SMB enum (nmap scripts: os, shares)"
+    category: smb
+    requires: [net.services]
+    produces: [net.smb.enum]
+    when_ports_any: [445, 139]
+    command: nmap -Pn -p 139,445 --script smb-os-discovery,smb-enum-shares {ip} -oN {out}/nmap_smb_enum.txt
+    parser: capture_file
+    output_file: nmap_smb_enum.txt
+    optional: true
+    requires_tools: [nmap]
+    priority: 35
+
+  - id: smbclient_list_shares_null
+    title: SMB list shares (null session) via smbclient
+    category: smb
+    requires: [net.services]
+    produces: [smb.shares_raw]
+    when_ports_any: [445, 139]
+    command: >-
+      bash -lc 'timeout {bash_timeout_sec}s smbclient -L //{ip} -N 2>&1 || true' > {out}/smbclient_list_shares_null.txt
+    parser: capture_file
+    output_file: smbclient_list_shares_null.txt
+    optional: true
+    requires_tools: [bash, smbclient, timeout]
+    priority: 34
+
+  - id: smbclient_list_share_roots_null
+    title: SMB list root directory for each share (null session)
+    category: smb
+    requires: [net.services]
+    produces: [smb.share_roots_raw]
+    when_ports_any: [445, 139]
+    command: >-
+      bash -lc 'out="{out}/smbclient_share_roots_null.txt";
+      : > "$out";
+      shares=$(timeout {bash_timeout_sec}s smbclient -L //{ip} -N 2>/dev/null | awk "/Disk/{print \$1}");
+      for s in $shares; do
+        echo "### Share: $s" >> "$out";
+        timeout {bash_timeout_sec}s smbclient //{ip}/$s -N -c "ls" 2>&1 | head -n 200 >> "$out";
+        echo >> "$out";
+      done;
+      cat "$out"'
+    parser: capture_file
+    output_file: smbclient_share_roots_null.txt
+    optional: true
+    requires_tools: [bash, smbclient, awk, head, cat, timeout]
+    priority: 22
+
+  - id: ldap_rootdse_discovery
+    title: LDAP RootDSE discovery (anonymous) on 389/636
+    category: ldap
+    requires: [net.services]
+    produces: [ldap.rootdse_raw, ldap.naming_contexts_hint]
+    when_ports_any: [389, 636]
+    command: >-
+      bash -lc 'set +e;
+      echo "### ldap://{ip}:389 RootDSE";
+      timeout {bash_timeout_sec}s ldapsearch -x -H ldap://{ip}:389 -s base -b "" "(objectClass=*)" + 2>&1;
+      echo;
+      echo "### ldaps://{ip}:636 RootDSE";
+      timeout {bash_timeout_sec}s ldapsearch -x -H ldaps://{ip}:636 -s base -b "" "(objectClass=*)" + 2>&1;
+      echo;
+      echo "### namingContexts (best-effort)";
+      (timeout {bash_timeout_sec}s ldapsearch -x -H ldap://{ip}:389 -s base -b "" "(objectClass=*)" namingContexts 2>/dev/null | awk "/^namingContexts:/{print \$2}" | sort -u) || true' > {out}/ldap_rootdse.txt
+    parser: capture_file
+    output_file: ldap_rootdse.txt
+    optional: true
+    requires_tools: [bash, ldapsearch, awk, sort, timeout]
+    priority: 30
+
+  # ----------------------------
+  # Phase 6: Noisy / fallback probes (keep optional)
+  # ----------------------------
+  - id: nc_tcp_port_sweep_1_1000
+    title: TCP port sweep 1-1000 using netcat (noisy; fallback)
+    category: discovery
+    requires: []
+    produces: [net.nc_sweep_1_1000_raw]
+    command: bash -lc 'nc -v -n {ip} 1-1000 2>&1 || true' > {out}/nc_sweep_1_1000.txt
+    parser: capture_file
+    output_file: nc_sweep_1_1000.txt
+    optional: true
+    requires_tools: [bash, nc]
+    priority: 1
